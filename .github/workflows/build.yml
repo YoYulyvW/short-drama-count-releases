@@ -16,7 +16,6 @@ permissions:
   contents: write
 
 env:
-  # ✅ 直接硬编码，不依赖 Variables
   SOURCE_REPO_OWNER: YoYulyvW
   SOURCE_REPO_NAME:  short-drama-count
   PUBLIC_REPO_OWNER: YoYulyvW
@@ -50,23 +49,17 @@ jobs:
         run: |
           echo "Owner: ${SOURCE_REPO_OWNER}"
           echo "Repo:  ${SOURCE_REPO_NAME}"
-
           if [ -z "$SRC_TOKEN" ]; then
             echo "❌ 未配置 SOURCE_REPO_TOKEN"
             exit 1
           fi
-          if [ -z "$SOURCE_REPO_OWNER" ] || [ -z "$SOURCE_REPO_NAME" ]; then
-            echo "❌ SOURCE_REPO_OWNER 或 SOURCE_REPO_NAME 为空"
-            exit 1
-          fi
-
           git clone --depth 1 \
             "https://x-access-token:${SRC_TOKEN}@github.com/${SOURCE_REPO_OWNER}/${SOURCE_REPO_NAME}.git" \
             source
           echo "✅ 源码已拉取"
           ls -la source/
 
-      # ===== 3. 复制源码到工作目录 =====
+      # ===== 3. 复制源码 =====
       - name: Copy source files
         run: |
           cp -r source/ShortDramaCount        ./
@@ -133,7 +126,7 @@ jobs:
           path: ShortDramaCount.ipa
           retention-days: 30
 
-      # ===== 11. 提交到公开库 =====
+      # ===== 11. 发布 =====
       - name: Publish to repo
         if: ${{ github.event.inputs.push_to_releases == 'true' }}
         env:
@@ -146,7 +139,8 @@ jobs:
           mkdir -p "v${VERSION}"
           cp ShortDramaCount.ipa "v${VERSION}/ShortDramaCount.ipa"
 
-          IPA_URL="https://raw.githubusercontent.com/${PUBLIC_REPO_OWNER}/${PUBLIC_REPO_NAME}/main/v${VERSION}/ShortDramaCount.ipa"
+          # ✅ 关键：用 refs/heads/main 避免 302 重定向
+          IPA_URL="https://raw.githubusercontent.com/${PUBLIC_REPO_OWNER}/${PUBLIC_REPO_NAME}/refs/heads/main/v${VERSION}/ShortDramaCount.ipa"
           PUBLISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           COMMIT_MSG="${{ github.event.head_commit.message }}"
           if [ -z "$COMMIT_MSG" ]; then COMMIT_MSG="manual build"; fi
