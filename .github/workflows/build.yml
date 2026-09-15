@@ -1,0 +1,187 @@
+name: Build & Release
+
+on:
+  # 手动触发（推荐）
+  workflow_dispatch:
+    inputs:
+      push_to_releases:
+        description: '发布为新版本（用户可检测到更新）'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: write
+
+env:
+  SOURCE_REPO_OWNER: ${{ vars.SOURCE_REPO_OWNER }}
+  SOURCE_REPO_NAME:  ${{ vars.SOURCE_REPO_NAME }}
+  PUBLIC_REPO_OWNER: YoYulyvW
+  PUBLIC_REPO_NAME:  short-drama-count-releases
+  KEEP_VERSIONS: 5
+  # 版本号偏移：让版本从 1.0.100 起（避免和旧版本冲突）
+  VERSION_OFFSET: 100
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout public repo (workflow + latest.json)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ===== 1. 计算版本号 =====
+      - name: Compute version
+        id: version
+        run: |
+          VERSION="1.0.$(( ${{ github.run_number }} + ${{ env.VERSION_OFFSET }} ))"
+          TAG="v${VERSION}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG"           >> $GITHUB_OUTPUT
+          echo "📦 Building $VERSION (tag: $TAG)"
+
+      # ===== 2. ✅ 从私有库拉源码 =====
+      - name: Clone private source repo
+        env:
+          SRC_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+        run: |
+          if [ -z "$SRC_TOKEN" ]; then
+            echo "❌ 未配置 SOURCE_REPO_TOKEN"
+            exit 1
+          fi
+          git clone --depth 1 \
+            "https://x-access-token:${SRC_TOKEN}@github.com/${SOURCE_REPO_OWNER}/${SOURCE_REPO_NAME}.git" \
+            source
+          echo "✅ 源码已拉取到 source/ 目录"
+          ls -la source/
+
+      # ===== 3. 复制源码到工作目录（关键：不覆盖 workflow 和 latest.json）=====
+      - name: Copy source files to workspace
+        run: |
+          # 复制需要的源码目录/文件
+          cp -r source/ShortDramaCount        ./
+          cp -r source/icon                   ./
+          cp    source/project.yml            ./
+          cp    source/Info.plist             ./ 2>/dev/null || true
+
+          echo "✅ 源码已复制到工作目录"
+          ls -la
+
+      # ===== 4. 选择 Xcode =====
+      - name: Select Xcode 15.4
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+
+      # ===== 5. 安装 xcodegen =====
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      # ===== 6. 准备 App 图标 =====
+      - name: Setup App Icon
+        run: |
+          ICON_DIR="ShortDramaCount/Assets.xcassets/AppIcon.appiconset"
+          mkdir -p "$ICON_DIR"
+          if [ ! -f "icon/icon.png" ]; then
+            echo "❌ 未找到 icon/icon.png"
+            exit 1
+          fi
+          sips -s format png --resampleHeightWidth 1024 1024 \
+            icon/icon.png --out "$ICON_DIR/icon_1024.png" >/dev/null
+          printf '%s' '{"images":[{"filename":"icon_1024.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}' > "$ICON_DIR/Contents.json"
+
+      # ===== 7. 生成 Xcode 工程 =====
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      # ===== 8. 编译 =====
+      - name: Build
+        run: |
+          xcodebuild \
+            -project ShortDramaCount.xcodeproj \
+            -scheme ShortDramaCount \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            MARKETING_VERSION="${{ steps.version.outputs.version }}" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      # ===== 9. 打包 IPA =====
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/ShortDramaCount.app Payload/
+          zip -r ShortDramaCount.ipa Payload
+          ls -la ShortDramaCount.ipa
+
+      # ===== 10. 上传 Artifact =====
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShortDramaCount-ipa-${{ steps.version.outputs.version }}
+          path: ShortDramaCount.ipa
+          retention-days: 30
+
+      # ===== 11. 提交到公开库（IPA + latest.json）=====
+      - name: Publish to repo
+        if: ${{ github.event.inputs.push_to_releases == 'true' }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name  "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+
+          mkdir -p "v${VERSION}"
+          cp ShortDramaCount.ipa "v${VERSION}/ShortDramaCount.ipa"
+
+          IPA_URL="https://raw.githubusercontent.com/${PUBLIC_REPO_OWNER}/${PUBLIC_REPO_NAME}/main/v${VERSION}/ShortDramaCount.ipa"
+          PUBLISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          if [ -z "$COMMIT_MSG" ]; then COMMIT_MSG="manual build"; fi
+
+          python3 - <<PYEOF
+          import json, os
+          data = {
+              "version": os.environ["VERSION"],
+              "tag": os.environ["TAG"],
+              "ipa_url": "${IPA_URL}",
+              "published_at": "${PUBLISHED_AT}",
+              "notes": """${COMMIT_MSG}""".strip()[:500]
+          }
+          with open("latest.json", "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+          PYEOF
+
+          # 清理旧版本（保留最近 N 个）
+          echo "当前版本目录："
+          ls -d v* 2>/dev/null | sort -V | head -n -${KEEP_VERSIONS} | while read old; do
+            echo "🗑 删除旧版本: $old"
+            git rm -r --quiet "$old" || rm -rf "$old"
+          done
+
+          # ⚠️ 不提交源码！只提交 IPA 和 latest.json
+          git add "v${VERSION}" latest.json
+          git status
+
+          if git diff --cached --quiet; then
+            echo "没有变化，跳过提交"
+          else
+            git commit -m "release: v${VERSION}"
+            git pull --rebase origin main || git pull --rebase origin master || true
+            git push origin HEAD:main || git push origin HEAD:master
+            echo "✅ 已发布 v${VERSION}"
+          fi
+
+      # ===== 12. 清理临时文件（可选，Runner 本来就会销毁）=====
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf source ShortDramaCount icon project.yml build Payload
+          echo "✅ 临时文件已清理（其实 Runner 会自动销毁）"
