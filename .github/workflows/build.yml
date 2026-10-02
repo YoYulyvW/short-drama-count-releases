@@ -158,11 +158,21 @@ jobs:
               json.dump(data, f, ensure_ascii=False, indent=2)
           PYEOF
 
-          echo "当前版本目录："
-          ls -d v* 2>/dev/null | sort -V | head -n -${KEEP_VERSIONS} | while read old; do
-            echo "🗑 删除旧版本: $old"
-            git rm -r --quiet "$old" || rm -rf "$old"
-          done
+          # ===== 版本清理（macOS 兼容版）=====
+          # 收集所有 v* 目录，按版本号排序
+          VERSION_DIRS=$(ls -d v* 2>/dev/null | sort -V || true)
+          TOTAL=$(printf '%s\n' "$VERSION_DIRS" | grep -c '^v' || true)
+          echo "当前版本目录数量：$TOTAL，保留最近 ${KEEP_VERSIONS} 个"
+          DELETE_COUNT=$((TOTAL - KEEP_VERSIONS))
+          if [ "$DELETE_COUNT" -gt 0 ]; then
+            printf '%s\n' "$VERSION_DIRS" | head -n "$DELETE_COUNT" | while IFS= read -r old; do
+              [ -z "$old" ] && continue
+              echo "🗑 删除旧版本: $old"
+              git rm -r --quiet "$old" || rm -rf "$old"
+            done
+          else
+            echo "无需清理旧版本"
+          fi
 
           git add "v${VERSION}" latest.json
           git status
